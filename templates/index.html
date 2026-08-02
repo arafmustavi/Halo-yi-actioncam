@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Halo — Camera Gallery</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="aura"></div>
+
+  <header class="nav">
+    <div class="nav-left">
+      <div class="logo" aria-hidden="true"><span class="ring"></span></div>
+      <div class="wordmark">
+        <span class="name">Halo</span>
+        <span class="sub">Camera Gallery</span>
+      </div>
+    </div>
+    <div class="nav-right">
+      <div class="chip" id="battery" hidden>
+        <svg viewBox="0 0 24 24" class="ico"><rect x="2" y="7" width="16" height="10" rx="2.5"/><rect x="19" y="10" width="2.5" height="4" rx="1"/></svg>
+        <span id="batteryText">—</span>
+      </div>
+      <button class="status" id="statusBtn">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">Connecting…</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <div>
+        <h1 id="galleryTitle">Your Moments</h1>
+        <p class="muted" id="gallerySub">Everything captured on your camera, in one place.</p>
+      </div>
+      <div class="segmented" role="tablist">
+        <button class="seg active" data-filter="all">All</button>
+        <button class="seg" data-filter="photo">Photos</button>
+        <button class="seg" data-filter="video">Videos</button>
+      </div>
+    </section>
+
+    <section id="gallery" class="gallery">
+      <div class="skeleton"></div><div class="skeleton"></div>
+      <div class="skeleton"></div><div class="skeleton"></div>
+      <div class="skeleton"></div><div class="skeleton"></div>
+    </section>
+
+    <section id="emptyState" class="empty" hidden>
+      <div class="empty-ring"></div>
+      <h2 id="emptyTitle">No moments yet</h2>
+      <p class="muted" id="emptyMsg">Tap the shutter below to capture your first shot.</p>
+      <button class="btn ghost" id="emptyRetry">Reload gallery</button>
+    </section>
+  </main>
+
+  <div class="dock">
+    <button class="dock-btn" id="btnRefresh" title="Refresh gallery" aria-label="Refresh">
+      <svg viewBox="0 0 24 24" class="ico"><path d="M20 11a8 8 0 10-.6 4M20 5v6h-6"/></svg>
+    </button>
+    <button class="shutter" id="btnCapture" title="Capture photo" aria-label="Capture photo">
+      <span class="shutter-ring"></span>
+      <span class="shutter-core"></span>
+    </button>
+    <button class="dock-btn rec" id="btnRecord" title="Record video" aria-label="Record video">
+      <span class="rec-icon" id="recIcon"></span>
+      <span class="rec-time" id="recTime" hidden>0:00</span>
+    </button>
+  </div>
+
+  <div id="lightbox" class="lightbox" hidden>
+    <button class="lb-close" id="lbClose" aria-label="Close">&times;</button>
+    <button class="lb-nav prev" id="lbPrev" aria-label="Previous">&#8249;</button>
+    <div class="lb-stage" id="lbStage"></div>
+    <button class="lb-nav next" id="lbNext" aria-label="Next">&#8250;</button>
+    <div class="lb-bar">
+      <span id="lbName" class="lb-name"></span>
+      <a id="lbDownload" class="btn small" download>Download</a>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
