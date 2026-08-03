@@ -23,6 +23,11 @@
         <svg viewBox="0 0 24 24" class="ico"><rect x="2" y="7" width="16" height="10" rx="2.5"/><rect x="19" y="10" width="2.5" height="4" rx="1"/></svg>
         <span id="batteryText">—</span>
       </div>
+      <!-- Dark mode toggle -->
+      <button class="icon-btn" id="themeToggle" title="Toggle dark mode" aria-label="Toggle dark mode">
+        <svg class="ico sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></svg>
+        <svg class="ico moon" viewBox="0 0 24 24"><path d="M21 12.8A8.5 8.5 0 1111.2 3a6.6 6.6 0 009.8 9.8z"/></svg>
+      </button>
       <button class="status" id="statusBtn">
         <span class="dot" id="statusDot"></span>
         <span id="statusText">Connecting…</span>
@@ -36,10 +41,20 @@
         <h1 id="galleryTitle">Your Moments</h1>
         <p class="muted" id="gallerySub">Everything captured on your camera, in one place.</p>
       </div>
-      <div class="segmented" role="tablist">
-        <button class="seg active" data-filter="all">All</button>
-        <button class="seg" data-filter="photo">Photos</button>
-        <button class="seg" data-filter="video">Videos</button>
+      <div class="hero-actions">
+        <div class="segmented" role="tablist">
+          <button class="seg active" data-filter="all">All</button>
+          <button class="seg" data-filter="photo">Photos</button>
+          <button class="seg" data-filter="video">Videos</button>
+        </div>
+        <button class="btn ghost" id="btnDownloadAll" title="Download everything to this PC">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>
+          Download All
+        </button>
+        <a class="btn accent" id="btnRunAI" href="/ai" title="Run YOLO object detection">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"/></svg>
+          Run AI
+        </a>
       </div>
     </section>
 
@@ -49,7 +64,6 @@
       <div class="skeleton"></div><div class="skeleton"></div>
     </section>
 
-    <!-- infinite-scroll sentinel + loader -->
     <div id="sentinel" class="sentinel" hidden>
       <div class="spinner"></div>
       <span id="loadMoreText">Loading more…</span>
@@ -62,6 +76,19 @@
       <button class="btn ghost" id="emptyRetry">Reload gallery</button>
     </section>
   </main>
+
+  <!-- Download-all progress sheet -->
+  <div id="dlSheet" class="sheet" hidden>
+    <div class="sheet-card">
+      <h3 id="dlTitle">Downloading to your PC…</h3>
+      <div class="progress"><div class="bar" id="dlBar"></div></div>
+      <p class="muted small" id="dlStatus">Preparing…</p>
+      <p class="muted small mono" id="dlFolder"></p>
+      <div class="sheet-actions">
+        <button class="btn ghost" id="dlClose" hidden>Done</button>
+      </div>
+    </div>
+  </div>
 
   <div class="dock">
     <button class="dock-btn" id="btnRefresh" title="Refresh gallery" aria-label="Refresh">

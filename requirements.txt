@@ -2,3 +2,8 @@ Flask>=3.0
 requests>=2.31
 waitress>=3.0
 Pillow>=10.0
+
+# AI detection (optional but recommended). Installing ultralytics pulls in
+# torch + opencv automatically. Comment these out for a lightweight,
+# gallery-only build.
+ultralytics>=8.1.0

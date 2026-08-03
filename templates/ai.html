@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Halo — AI Detection</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="aura"></div>
+
+  <header class="nav">
+    <div class="nav-left">
+      <a class="back" href="/" title="Back to gallery" aria-label="Back">
+        <svg class="ico" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+      </a>
+      <div class="logo" aria-hidden="true"><span class="ring"></span></div>
+      <div class="wordmark">
+        <span class="name">Halo AI</span>
+        <span class="sub">Object Detection</span>
+      </div>
+    </div>
+    <div class="nav-right">
+      <button class="icon-btn" id="themeToggle" title="Toggle dark mode" aria-label="Toggle dark mode">
+        <svg class="ico sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></svg>
+        <svg class="ico moon" viewBox="0 0 24 24"><path d="M21 12.8A8.5 8.5 0 1111.2 3a6.6 6.6 0 009.8 9.8z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <div>
+        <h1>Run AI Detection</h1>
+        <p class="muted" id="aiSub">Downloads your photos locally, runs YOLO object detection, and shows the results side by side.</p>
+      </div>
+      <div class="hero-actions">
+        <label class="field">
+          <span>Analyze</span>
+          <select id="aiLimit">
+            <option value="10">First 10 photos</option>
+            <option value="25">First 25 photos</option>
+            <option value="50">First 50 photos</option>
+            <option value="0">All photos</option>
+          </select>
+        </label>
+        <button class="btn accent" id="btnStart">
+          <svg class="ico" viewBox="0 0 24 24"><path d="M12 3l2.5 5.5L20 11l-5.5 2.5L12 19l-2.5-5.5L4 11l5.5-2.5z"/></svg>
+          Start Detection
+        </button>
+      </div>
+    </section>
+
+    <!-- unavailable notice -->
+    <section id="aiUnavailable" class="notice" hidden>
+      <strong>AI engine not installed.</strong>
+      <span id="aiUnavailableMsg"></span>
+      <code>pip install ultralytics</code>
+    </section>
+
+    <!-- progress -->
+    <section id="aiProgress" class="ai-progress" hidden>
+      <div class="progress"><div class="bar" id="aiBar"></div></div>
+      <div class="ai-progress-row">
+        <span id="aiCount" class="muted small mono">0 / 0</span>
+        <span id="aiCurrent" class="muted small"></span>
+      </div>
+    </section>
+
+    <!-- results: side-by-side pairs -->
+    <section id="aiResults" class="ai-results"></section>
+
+    <section id="aiEmpty" class="empty" hidden>
+      <div class="empty-ring"></div>
+      <h2>Ready when you are</h2>
+      <p class="muted">Choose how many photos to analyze, then press <strong>Start Detection</strong>.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="{{ url_for('static', filename='ai.js') }}"></script>
+</body>
+</html>

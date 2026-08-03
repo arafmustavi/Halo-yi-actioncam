@@ -1,18 +1,20 @@
-<p align="center">
-  <img src="docs/banner.png" alt="Halo — a minimalist web gallery for your action camera" width="100%">
-</p>
+<p align="center"><img src="docs/halo_icon.png" width="110" alt="Halo"></p>
+<h1 align="center">Halo — Camera Gallery + AI</h1>
 
 <p align="center">
-  <strong>A minimalist, Apple-inspired web app that turns an original Xiaomi YI Action Camera into a modern, browsable gallery — with capture and record — straight from your browser.</strong>
+  <strong>A web app for the Xiaomi YI Action Camera.
+  Browse your gallery, capture &amp; record, bulk-download to your PC, and run on-device YOLO object detection. Light &amp; dark.</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white">
-  <img src="https://img.shields.io/badge/Flask-3.0-000000?logo=flask&logoColor=white">
-  <img src="https://img.shields.io/badge/Frontend-Vanilla_JS-F7DF1E?logo=javascript&logoColor=black">
-  <img src="https://img.shields.io/badge/Protocol-Reverse_Engineered-8A5BFF">
+  <img src="https://img.shields.io/badge/Flask-3-000000?logo=flask&logoColor=white">
+  <img src="https://img.shields.io/badge/AI-YOLO_(Ultralytics)-8A5BFF">
+  <img src="https://img.shields.io/badge/Portable-EXE_ready-0071e3">
   <img src="https://img.shields.io/badge/License-MIT-green">
 </p>
+
+
 
 ---
 
@@ -37,6 +39,14 @@ The original Xiaomi YI Action Camera has **no screen** and its companion mobile 
 | ⏺️ | **Remote record** | Start/stop video with a live recording timer |
 | 🔋 | **Live device status** | Real-time connection indicator + battery level, auto-polled |
 | 📱 | **Fully responsive** | Fluid layout from desktop down to a 3-column mobile grid |
+| 🖼️ | **Paginated gallery** | with infinite scroll — gentle on the camera's tiny server|
+| ⚡| **Two-layer thumbnail cache** |(server disk + browser IndexedDB) → each photo is fetched **once**|
+| 🌙| **Dark mode** | one-tap toggle, remembers your choice, auto-follows the OS |
+| ⬇️| **Download All** | save every photo/video to a local folder with live progress |
+| 🧠 | **Run AI** | downloads photos locally, runs **YOLO**, and shows **original vs. annotated side-by-side** with detected-object tags |
+| 📸 | Capture | ⏺️ Record with live timer · 🔋 live status |
+| 📦 | **Portable** | build a no-install `Halo.exe` (see `../portable-builder`)|
+
 
 ---
 
@@ -152,7 +162,7 @@ halo/
 ├── requirements.txt
 └── README.md
 ```
-# ⚡ Halo Performance: Pagination & Caching
+# Pagination & Caching for better user experience
 
 The original Xiaomi YI has a **tiny embedded HTTP server**. Loading a whole
 gallery at once fires dozens of simultaneous image requests at it, which it
@@ -190,20 +200,47 @@ serializes and chokes on. This build fixes that with four layers.
 **Net effect:** the first scroll pulls a few small thumbnails gently, three at a
 time; everything after is instant and never re-hits the camera. 🎯
 
+
+<p align="center"><sub>Built as a study in reverse-engineering, pragmatic product decisions, and interface craft.</sub></p>
 ---
 
-## 🗺️ Roadmap
 
-- [ ] Multi-select with bulk download & delete
-- [ ] Dark mode
-- [ ] On-device **YOLO object detection** on any captured photo
-- [ ] PWA / installable offline shell
-- [ ] Dockerized deployment
+## 🧠 How "Run AI" works
+
+1. Click **Run AI** → the `/ai` page.
+2. Choose how many photos, press **Start Detection**.
+3. The backend **downloads each photo** to `Halo_AI/originals/`, runs **YOLO**,
+   writes an annotated copy to `Halo_AI/annotated/`, and streams results back.
+4. As each finishes, you see the **original and AI-annotated image side by side**
+   with a live progress bar and per-image object tags (e.g. `person ×2`, `car ×1`).
+
+## 📂 Where files go
+
+Next to the app (or the exe):
+```
+Halo_Downloads/          ← "Download All" output (timestamped subfolders)
+Halo_AI/originals/       ← photos pulled for AI
+Halo_AI/annotated/       ← YOLO-annotated results
+thumb_cache/             ← server thumbnail cache
+```
+
+## ⚙️ Config (env vars)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `YI_IP` | `192.168.42.1` | Camera IP |
+| `HALO_PAGE_SIZE` | `24` | Gallery page size |
+| `HALO_THUMB_PX` | `320` | Thumbnail size |
+| `HALO_YOLO_MODEL` | `yolov8n.pt` | YOLO weights (auto-downloaded) |
+| `HALO_DOWNLOADS_DIR` / `HALO_AI_DIR` / `HALO_CACHE_DIR` | next to app | Output locations |
+
+## 📦 Make a portable app
+
+See **[`../portable-builder`](../portable-builder)** — `build.bat` for a tiny
+gallery `Halo.exe`, or `build.bat ai` for the full AI build.
 
 ---
 
 ## 📄 License
 
 MIT — see [`LICENSE`](LICENSE).
-
-<p align="center"><sub>Built as a study in reverse-engineering, pragmatic product decisions, and interface craft.</sub></p>

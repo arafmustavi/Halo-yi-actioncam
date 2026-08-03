@@ -1,9 +1,15 @@
 """
-Halo -- a minimalist gallery & capture app for the Xiaomi YI Action Camera.
-
+Halo -- minimalist gallery, capture, bulk-download & on-device AI for the Xiaomi YI Action Camera.
 This build adds performance features that stop the camera's tiny embedded HTTP
 server from being overwhelmed:
 
+Features in this build:
+  * Paginated gallery (cheap on the camera) + server thumbnail cache
+  * Concurrency cap so the camera's tiny HTTP server isn't overwhelmed
+  * "Download All" -> saves media to a local folder with live progress
+  * "Run AI" -> downloads photos locally, runs YOLO, saves annotated copies,
+                streams side-by-side results with a progress bar
+  * Dark mode is purely client-side (see static/app.js + style.css)
   * PAGINATION      -> /api/gallery?page=&page_size=  returns a metadata slice
                        + total + has_more (no thumbnails touched server-side).
   * FILE-LIST CACHE -> the DCIM listing is scraped once and cached (short TTL)
@@ -27,7 +33,8 @@ from io import BytesIO
 from urllib.parse import unquote, quote
 
 import requests
-from flask import Flask, Response, jsonify, render_template, request, abort, send_file
+from flask import (Flask, Response, jsonify, render_template, request, abort,
+                   send_file, send_from_directory)
 
 from yi_camera import YiCamera, YiCameraError
 
@@ -39,7 +46,7 @@ except Exception:
 
 
 # ---------------------------------------------------------------------------
-# Frozen-aware paths (works from source AND from a PyInstaller build)
+# Paths (frozen-aware)
 # ---------------------------------------------------------------------------
 def resource_path(rel):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -47,7 +54,6 @@ def resource_path(rel):
 
 
 def writable_dir():
-    """A place we can write the thumbnail cache (next to the exe / script)."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
@@ -56,26 +62,25 @@ def writable_dir():
 CAMERA_IP     = os.environ.get("YI_IP", "192.168.42.1")
 PAGE_SIZE     = int(os.environ.get("HALO_PAGE_SIZE", "24"))
 THUMB_PX      = int(os.environ.get("HALO_THUMB_PX", "320"))
-LIST_TTL      = 15          # seconds to trust the cached DCIM listing
-MAX_CAMERA_IO = 3           # max simultaneous requests to the camera
+LIST_TTL      = 15
+MAX_CAMERA_IO = 3
 
-# Cache dir can be redirected (e.g. Android points it at app-private storage).
-CACHE_DIR = os.environ.get("HALO_CACHE_DIR") or os.path.join(writable_dir(), "thumb_cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
+BASE_DIR      = writable_dir()
+CACHE_DIR     = os.environ.get("HALO_CACHE_DIR") or os.path.join(BASE_DIR, "thumb_cache")
+DOWNLOADS_DIR = os.environ.get("HALO_DOWNLOADS_DIR") or os.path.join(BASE_DIR, "Halo_Downloads")
+AI_DIR        = os.environ.get("HALO_AI_DIR") or os.path.join(BASE_DIR, "Halo_AI")
+AI_ORIG_DIR   = os.path.join(AI_DIR, "originals")
+AI_ANNO_DIR   = os.path.join(AI_DIR, "annotated")
+for d in (CACHE_DIR, DOWNLOADS_DIR, AI_ORIG_DIR, AI_ANNO_DIR):
+    os.makedirs(d, exist_ok=True)
 
-app = Flask(
-    __name__,
-    template_folder=resource_path("templates"),
-    static_folder=resource_path("static"),
-)
+app = Flask(__name__,
+            template_folder=resource_path("templates"),
+            static_folder=resource_path("static"))
 
 camera = YiCamera(ip=CAMERA_IP)
 _state = {"recording": False, "rec_started": None}
-
-# Global throttle: never let more than MAX_CAMERA_IO hits reach the camera.
 _camera_sema = threading.Semaphore(MAX_CAMERA_IO)
-
-# Cached file listing (populated by _list_media, refreshed after LIST_TTL).
 _list_cache = {"ts": 0, "items": []}
 _list_lock = threading.Lock()
 
@@ -114,12 +119,10 @@ def _scrape_dir(url):
 
 
 def _list_media(force=False):
-    """Return the full, sorted media list (cached for LIST_TTL seconds)."""
     now = time.time()
     with _list_lock:
         if not force and (now - _list_cache["ts"] < LIST_TTL) and _list_cache["items"]:
             return _list_cache["items"]
-
     root = f"http://{CAMERA_IP}/DCIM/"
     all_files = []
     files, dirs = _scrape_dir(root)
@@ -127,17 +130,15 @@ def _list_media(force=False):
     for d in dirs:
         f2, _ = _scrape_dir(d)
         all_files += f2
-
     items = []
     for u in sorted(set(all_files), reverse=True):
         name = u.rsplit("/", 1)[-1]
         is_video = u.lower().endswith((".mp4", ".mov"))
         items.append({
-            "url": u,
-            "name": name,
+            "url": u, "name": name,
             "type": "video" if is_video else "photo",
-            "src": "/thumb?url=" + quote(u, safe=""),      # cached thumbnail
-            "full": "/media?url=" + quote(u, safe=""),      # full-res proxy
+            "src": "/thumb?url=" + quote(u, safe=""),
+            "full": "/media?url=" + quote(u, safe=""),
         })
     with _list_lock:
         _list_cache["ts"] = now
@@ -145,99 +146,80 @@ def _list_media(force=False):
     return items
 
 
+def _filtered(items, flt):
+    if flt in ("photo", "video"):
+        return [m for m in items if m["type"] == flt]
+    return items
+
+
 # ---------------------------------------------------------------------------
-# Routes
+# Pages
 # ---------------------------------------------------------------------------
 @app.route("/")
 def index():
     return render_template("index.html", camera_ip=CAMERA_IP)
 
 
+@app.route("/ai")
+def ai_page():
+    return render_template("ai.html", camera_ip=CAMERA_IP)
+
+
+# ---------------------------------------------------------------------------
+# Status / gallery / media
+# ---------------------------------------------------------------------------
 @app.route("/api/status")
 def api_status():
     try:
         ensure_connected()
         bat = camera.battery()
         rec_secs = int(time.time() - _state["rec_started"]) if _state["rec_started"] else 0
-        return jsonify({"ok": True, "connected": True,
-                        "battery": bat, "recording": _state["recording"],
-                        "rec_secs": rec_secs, "ip": CAMERA_IP})
+        return jsonify({"ok": True, "connected": True, "battery": bat,
+                        "recording": _state["recording"], "rec_secs": rec_secs,
+                        "ip": CAMERA_IP})
     except YiCameraError as exc:
         return jsonify({"ok": False, "connected": False, "error": str(exc)})
 
 
 @app.route("/api/gallery")
 def api_gallery():
-    """
-    Paginated gallery metadata. Query params:
-      page       (1-based, default 1)
-      page_size  (default PAGE_SIZE)
-      filter     (all | photo | video, default all)
-      refresh    (1 to force re-scrape the camera)
-    Returns only the slice for the requested page -- NO thumbnails are fetched
-    here, so this call is always cheap on the camera.
-    """
     try:
         page = max(1, int(request.args.get("page", 1)))
         page_size = max(1, min(100, int(request.args.get("page_size", PAGE_SIZE))))
         flt = request.args.get("filter", "all")
         force = request.args.get("refresh") == "1"
-
-        items = _list_media(force=force)
-        if flt in ("photo", "video"):
-            items = [m for m in items if m["type"] == flt]
-
+        items = _filtered(_list_media(force=force), flt)
         total = len(items)
         start = (page - 1) * page_size
         end = start + page_size
         page_items = items[start:end]
-
-        return jsonify({
-            "ok": True,
-            "page": page,
-            "page_size": page_size,
-            "total": total,
-            "returned": len(page_items),
-            "has_more": end < total,
-            "media": page_items,
-        })
+        return jsonify({"ok": True, "page": page, "page_size": page_size,
+                        "total": total, "returned": len(page_items),
+                        "has_more": end < total, "media": page_items})
     except Exception as exc:  # noqa
         return jsonify({"ok": False, "error": str(exc)})
 
 
 @app.route("/thumb")
 def thumb():
-    """
-    Return a small, cached thumbnail for a camera photo. First request for a
-    given file downscales it with Pillow and writes it to disk; every later
-    request is served straight from disk (the camera is never touched again).
-    Videos have no server thumbnail -> the UI shows a poster tile instead.
-    """
     url = request.args.get("url", "")
     if not url.startswith(f"http://{CAMERA_IP}"):
         abort(400, "Only camera URLs are allowed.")
     name = unquote(url.rsplit("/", 1)[-1])
-
-    # videos: no cheap server-side thumbnail; let the client show a placeholder
     if name.lower().endswith((".mp4", ".mov")):
         return ("", 204)
-
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
     cache_file = os.path.join(CACHE_DIR, f"{THUMB_PX}_{safe}.jpg")
-
     if os.path.exists(cache_file) and os.path.getsize(cache_file) > 0:
         return send_file(cache_file, mimetype="image/jpeg")
-
     if not PIL_OK:
-        # No Pillow -> fall back to proxying the full image (still works).
         return _proxy(url)
-
     try:
         with _camera_sema:
             r = requests.get(url, timeout=20)
             r.raise_for_status()
         img = Image.open(BytesIO(r.content))
-        img.draft("RGB", (THUMB_PX, THUMB_PX))     # fast partial decode
+        img.draft("RGB", (THUMB_PX, THUMB_PX))
         img = img.convert("RGB")
         img.thumbnail((THUMB_PX, THUMB_PX), Image.LANCZOS)
         img.save(cache_file, "JPEG", quality=82, optimize=True)
@@ -247,7 +229,6 @@ def thumb():
 
 
 def _proxy(url, as_attachment=False):
-    """Stream a camera file through the app (range-aware for video seeking)."""
     headers = {}
     rng = request.headers.get("Range")
     if rng:
@@ -257,8 +238,7 @@ def _proxy(url, as_attachment=False):
             r = requests.get(url, stream=True, timeout=25, headers=headers)
     except requests.RequestException as exc:
         return api_error(exc)
-    resp = Response(r.iter_content(chunk_size=32768),
-                    status=r.status_code,
+    resp = Response(r.iter_content(chunk_size=32768), status=r.status_code,
                     content_type=r.headers.get("Content-Type", "application/octet-stream"))
     for h in ("Content-Length", "Content-Range", "Accept-Ranges"):
         if h in r.headers:
@@ -285,12 +265,15 @@ def api_download():
     return _proxy(url, as_attachment=True)
 
 
+# ---------------------------------------------------------------------------
+# Capture / record
+# ---------------------------------------------------------------------------
 @app.route("/api/capture", methods=["POST"])
 def api_capture():
     try:
         ensure_connected()
         path = camera.take_photo()
-        _list_cache["ts"] = 0                     # invalidate listing cache
+        _list_cache["ts"] = 0
         url = camera.http_url_for(path) if path else None
         return jsonify({"ok": True, "path": path, "url": url})
     except YiCameraError as exc:
@@ -322,31 +305,185 @@ def api_record_stop():
         return api_error(exc)
 
 
+# ---------------------------------------------------------------------------
+# Bulk "Download All" -> local folder, with progress
+# ---------------------------------------------------------------------------
+_dl_job = {"running": False, "done": 0, "total": 0, "current": "",
+           "errors": [], "folder": DOWNLOADS_DIR, "finished": False}
+_dl_lock = threading.Lock()
+
+
+def _download_one(url, dest):
+    with _camera_sema:
+        r = requests.get(url, stream=True, timeout=60)
+        r.raise_for_status()
+        tmp = dest + ".part"
+        with open(tmp, "wb") as fh:
+            for chunk in r.iter_content(chunk_size=65536):
+                fh.write(chunk)
+        os.replace(tmp, dest)
+
+
+def _run_download_all(items, subfolder):
+    target = os.path.join(DOWNLOADS_DIR, subfolder) if subfolder else DOWNLOADS_DIR
+    os.makedirs(target, exist_ok=True)
+    with _dl_lock:
+        _dl_job.update(running=True, done=0, total=len(items), current="",
+                       errors=[], folder=target, finished=False)
+    for m in items:
+        with _dl_lock:
+            _dl_job["current"] = m["name"]
+        dest = os.path.join(target, m["name"])
+        try:
+            if not (os.path.exists(dest) and os.path.getsize(dest) > 0):
+                _download_one(m["url"], dest)
+        except Exception as exc:  # noqa
+            with _dl_lock:
+                _dl_job["errors"].append({"name": m["name"], "error": str(exc)})
+        with _dl_lock:
+            _dl_job["done"] += 1
+    with _dl_lock:
+        _dl_job["running"] = False
+        _dl_job["finished"] = True
+        _dl_job["current"] = ""
+
+
+@app.route("/api/download-all/start", methods=["POST"])
+def api_download_all_start():
+    with _dl_lock:
+        if _dl_job["running"]:
+            return jsonify({"ok": False, "error": "A download is already running."}), 409
+    try:
+        flt = request.args.get("filter", "all")
+        items = _filtered(_list_media(), flt)
+        if not items:
+            return jsonify({"ok": False, "error": "Nothing to download."})
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        threading.Thread(target=_run_download_all, args=(items, stamp), daemon=True).start()
+        return jsonify({"ok": True, "total": len(items),
+                        "folder": os.path.join(DOWNLOADS_DIR, stamp)})
+    except Exception as exc:  # noqa
+        return api_error(exc)
+
+
+@app.route("/api/download-all/progress")
+def api_download_all_progress():
+    with _dl_lock:
+        return jsonify({"ok": True, **_dl_job})
+
+
+# ---------------------------------------------------------------------------
+# AI job (YOLO)  -> download originals, run detection, save annotated
+# ---------------------------------------------------------------------------
+import yolo_detect  # noqa: E402
+
+_ai_job = {"running": False, "done": 0, "total": 0, "current": "",
+           "results": [], "error": None, "finished": False}
+_ai_lock = threading.Lock()
+
+
+def _run_ai(items):
+    with _ai_lock:
+        _ai_job.update(running=True, done=0, total=len(items), current="",
+                       results=[], error=None, finished=False)
+
+    ok, msg = yolo_detect.available()
+    if not ok:
+        with _ai_lock:
+            _ai_job.update(running=False, finished=True, error=msg)
+        return
+
+    for m in items:
+        name = m["name"]
+        with _ai_lock:
+            _ai_job["current"] = name
+        base, _ext = os.path.splitext(name)
+        orig_path = os.path.join(AI_ORIG_DIR, name)
+        anno_path = os.path.join(AI_ANNO_DIR, base + "_annotated.jpg")
+        entry = {"name": name,
+                 "original": "/ai/original/" + quote(name),
+                 "annotated": "/ai/annotated/" + quote(base + "_annotated.jpg"),
+                 "ok": False, "count": 0, "summary": {}, "error": None}
+        try:
+            if not (os.path.exists(orig_path) and os.path.getsize(orig_path) > 0):
+                _download_one(m["url"], orig_path)
+            res = yolo_detect.detect(orig_path, anno_path)
+            if res.get("ok"):
+                entry.update(ok=True, count=res["count"], summary=res["summary"])
+            else:
+                entry["error"] = res.get("error", "detection failed")
+        except Exception as exc:  # noqa
+            entry["error"] = str(exc)
+        with _ai_lock:
+            _ai_job["results"].append(entry)
+            _ai_job["done"] += 1
+
+    with _ai_lock:
+        _ai_job["running"] = False
+        _ai_job["finished"] = True
+        _ai_job["current"] = ""
+
+
+@app.route("/api/ai/available")
+def api_ai_available():
+    ok, msg = yolo_detect.available()
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/ai/start", methods=["POST"])
+def api_ai_start():
+    with _ai_lock:
+        if _ai_job["running"]:
+            return jsonify({"ok": False, "error": "AI run already in progress."}), 409
+    flt = request.args.get("filter", "photo")   # photos only by default
+    limit = request.args.get("limit")
+    items = [m for m in _list_media() if m["type"] == "photo"] if flt == "photo" \
+        else _filtered(_list_media(), flt)
+    if limit:
+        try:
+            items = items[: int(limit)]
+        except ValueError:
+            pass
+    if not items:
+        return jsonify({"ok": False, "error": "No photos to analyze."})
+    threading.Thread(target=_run_ai, args=(items,), daemon=True).start()
+    return jsonify({"ok": True, "total": len(items)})
+
+
+@app.route("/api/ai/progress")
+def api_ai_progress():
+    with _ai_lock:
+        return jsonify({"ok": True, **_ai_job})
+
+
+@app.route("/ai/original/<path:name>")
+def ai_original(name):
+    return send_from_directory(AI_ORIG_DIR, name)
+
+
+@app.route("/ai/annotated/<path:name>")
+def ai_annotated(name):
+    return send_from_directory(AI_ANNO_DIR, name)
+
+
+# ---------------------------------------------------------------------------
+# Cache housekeeping
+# ---------------------------------------------------------------------------
 @app.route("/api/cache/clear", methods=["POST"])
 def api_cache_clear():
-    """Delete all cached thumbnails (housekeeping)."""
     n = 0
     for f in os.listdir(CACHE_DIR):
         try:
-            os.remove(os.path.join(CACHE_DIR, f))
-            n += 1
+            os.remove(os.path.join(CACHE_DIR, f)); n += 1
         except OSError:
             pass
     return jsonify({"ok": True, "removed": n})
 
 
-@app.route("/api/cache/info")
-def api_cache_info():
-    total = 0
-    count = 0
-    for f in os.listdir(CACHE_DIR):
-        try:
-            total += os.path.getsize(os.path.join(CACHE_DIR, f))
-            count += 1
-        except OSError:
-            pass
-    return jsonify({"ok": True, "count": count,
-                    "bytes": total, "mb": round(total / 1048576, 2)})
+@app.route("/api/paths")
+def api_paths():
+    return jsonify({"ok": True, "downloads": DOWNLOADS_DIR,
+                    "ai": AI_DIR, "cache": CACHE_DIR})
 
 
 # ---------------------------------------------------------------------------
@@ -365,11 +502,12 @@ def _find_free_port(preferred=5000):
 def main():
     port = _find_free_port(int(os.environ.get("HALO_PORT", "5000")))
     url = f"http://127.0.0.1:{port}"
-    line = "=" * 52
-    print(f"\n{line}\n   Halo  -  Camera Gallery\n{line}")
+    line = "=" * 54
+    print(f"\n{line}\n   Halo  -  Camera Gallery + AI\n{line}")
     print(f"   Running at : {url}")
     print( "   Camera Wi-Fi: YDXJ_xxxxxxx  (pass 1234567890)")
-    print(f"   Thumb cache : {CACHE_DIR}")
+    print(f"   Downloads  : {DOWNLOADS_DIR}")
+    print(f"   AI outputs : {AI_DIR}")
     print( "   Quit        : close this window")
     print(line + "\n")
     threading.Timer(1.2, lambda: webbrowser.open(url)).start()

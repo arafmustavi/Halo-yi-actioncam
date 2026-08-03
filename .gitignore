@@ -1,8 +1,19 @@
-thumb_cache/
 __pycache__/
 *.pyc
-venv/
 .venv/
-downloads/
-.DS_Store
+.venv-build/
+build/
+dist/
+# runtime output folders
+Halo_Downloads/
+Halo_AI/
+thumb_cache/
+# demo artifacts
+demo_*.html
+mkdemo.py
+shot_*.png
+demo_media/
 *.log
+.DS_Store
+codes/
+venv/
