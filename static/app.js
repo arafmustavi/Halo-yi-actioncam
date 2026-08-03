@@ -1,7 +1,28 @@
-/* Halo — frontend logic (vanilla JS) */
+/* ============================================================
+   Halo — frontend logic (vanilla JS)
+   New in this build:
+     • Pagination via infinite scroll (IntersectionObserver)
+     • Concurrency-limited thumbnail fetching (protects the camera)
+     • IndexedDB thumbnail cache (each image pulled from camera ONCE)
+   ============================================================ */
 const $  = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
-const state = { media: [], filter: "all", recording: false, recTimer: null };
+
+const PAGE_SIZE = 24;
+const MAX_CONCURRENT_THUMBS = 3;   // never hammer the camera
+
+const state = {
+  filter: "all",
+  page: 0,
+  hasMore: true,
+  loading: false,
+  total: 0,
+  loaded: [],           // flat list of media already rendered (for lightbox)
+  recording: false,
+  recTimer: null,
+};
+
+/* ---------- tiny helpers ---------- */
 const post = async (u) => (await fetch(u, { method: "POST" })).json();
 const get  = async (u) => (await fetch(u)).json();
 
@@ -14,6 +35,103 @@ function toast(msg, kind = "") {
 }
 function fmtTime(s){const m=Math.floor(s/60),sec=s%60;return `${m}:${sec.toString().padStart(2,"0")}`;}
 
+/* ============================================================
+   IndexedDB thumbnail cache
+   Stores each thumbnail Blob keyed by its stable filename, so a
+   photo is only ever fetched from the camera one time.
+   ============================================================ */
+const ThumbCache = (() => {
+  const DB = "halo-cache", STORE = "thumbs", VER = 1;
+  let dbp;
+  function open() {
+    if (dbp) return dbp;
+    dbp = new Promise((res, rej) => {
+      const rq = indexedDB.open(DB, VER);
+      rq.onupgradeneeded = () => rq.result.createObjectStore(STORE);
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => rej(rq.error);
+    });
+    return dbp;
+  }
+  async function get(key) {
+    try {
+      const db = await open();
+      return await new Promise((res) => {
+        const tx = db.transaction(STORE, "readonly").objectStore(STORE).get(key);
+        tx.onsuccess = () => res(tx.result || null);
+        tx.onerror = () => res(null);
+      });
+    } catch { return null; }
+  }
+  async function set(key, blob) {
+    try {
+      const db = await open();
+      await new Promise((res) => {
+        const tx = db.transaction(STORE, "readwrite").objectStore(STORE).put(blob, key);
+        tx.onsuccess = () => res(); tx.onerror = () => res();
+      });
+    } catch {}
+  }
+  async function clear() {
+    try {
+      const db = await open();
+      await new Promise((res) => {
+        const tx = db.transaction(STORE, "readwrite").objectStore(STORE).clear();
+        tx.onsuccess = () => res(); tx.onerror = () => res();
+      });
+    } catch {}
+  }
+  return { get, set, clear };
+})();
+
+/* ============================================================
+   Concurrency-limited task queue for thumbnail loads
+   ============================================================ */
+class Limiter {
+  constructor(max){ this.max=max; this.active=0; this.q=[]; }
+  run(task){
+    return new Promise((resolve,reject)=>{
+      this.q.push({task,resolve,reject});
+      this._next();
+    });
+  }
+  _next(){
+    if(this.active>=this.max || !this.q.length) return;
+    this.active++;
+    const {task,resolve,reject}=this.q.shift();
+    task().then(resolve,reject).finally(()=>{ this.active--; this._next(); });
+  }
+}
+const thumbLimiter = new Limiter(MAX_CONCURRENT_THUMBS);
+
+/* Load a thumbnail into <img>, using IndexedDB first, else fetch (throttled). */
+async function hydrateThumb(imgEl, m){
+  // 1) cache hit?
+  const cached = await ThumbCache.get(m.name);
+  if (cached){ imgEl.src = URL.createObjectURL(cached); return; }
+  // 2) fetch through the limiter so the camera isn't overwhelmed
+  try{
+    const blob = await thumbLimiter.run(async ()=>{
+      const r = await fetch(m.src);
+      if(!r.ok || r.status===204) throw new Error("no-thumb");
+      return await r.blob();
+    });
+    ThumbCache.set(m.name, blob);           // store for next time
+    imgEl.src = URL.createObjectURL(blob);
+  }catch{
+    // videos / failures -> show a placeholder tile
+    imgEl.replaceWith(placeholderTile(m));
+  }
+}
+function placeholderTile(m){
+  const d=document.createElement("div");
+  d.className="ph"; d.textContent = m.type==="video" ? "🎬" : "🖼";
+  return d;
+}
+
+/* ============================================================
+   Status
+   ============================================================ */
 async function refreshStatus() {
   try {
     const s = await get("/api/status");
@@ -27,57 +145,130 @@ function setConnected(on){
   $("#statusText").textContent=on?"Connected":"Offline";
 }
 
-async function loadGallery() {
-  const g=$("#gallery");
-  g.innerHTML=Array(6).fill('<div class="skeleton"></div>').join("");
-  $("#emptyState").hidden=true; g.hidden=false;
-  const r=await get("/api/gallery");
-  if(!r.ok){showEmpty("Couldn’t reach the camera", r.error||"Make sure you’re on the YDXJ_ Wi-Fi network.");return;}
-  state.media=r.media||[]; renderGallery();
-  if(state.media.length) toast(`${r.count} moment${r.count===1?"":"s"} loaded`, "ok");
+/* ============================================================
+   Gallery — paginated + infinite scroll
+   ============================================================ */
+function resetGallery(){
+  state.page=0; state.hasMore=true; state.loading=false; state.total=0; state.loaded=[];
+  $("#gallery").innerHTML="";
+  $("#emptyState").hidden=true;
 }
-function renderGallery() {
-  const g=$("#gallery");
-  const items=state.media.filter(m=>state.filter==="all"||m.type===state.filter);
-  if(!items.length){
-    if(!state.media.length) showEmpty("No moments yet","Tap the shutter below to capture your first shot.");
-    else showEmpty(`No ${state.filter}s`,"Try a different filter or capture something new.");
+
+async function loadNextPage(){
+  if(state.loading || !state.hasMore) return;
+  state.loading=true;
+  $("#sentinel").hidden=false;
+
+  // first page shows skeletons
+  if(state.page===0){
+    $("#gallery").innerHTML=Array(6).fill('<div class="skeleton"></div>').join("");
+  }
+
+  const next = state.page + 1;
+  let r;
+  try{
+    r = await get(`/api/gallery?page=${next}&page_size=${PAGE_SIZE}&filter=${state.filter}`);
+  }catch(e){
+    state.loading=false; $("#sentinel").hidden=true;
+    if(state.page===0) showEmpty("Couldn’t reach the camera","Make sure you’re on the YDXJ_ Wi-Fi network.");
     return;
   }
-  $("#emptyState").hidden=true; g.hidden=false; g.innerHTML="";
-  items.forEach((m,i)=>{
+
+  if(state.page===0) $("#gallery").innerHTML="";   // clear skeletons
+
+  if(!r.ok){
+    state.loading=false; $("#sentinel").hidden=true;
+    if(state.page===0) showEmpty("Couldn’t reach the camera", r.error||"Please try again.");
+    return;
+  }
+
+  state.total = r.total;
+  state.hasMore = r.has_more;
+  state.page = next;
+
+  if(!r.media.length && state.loaded.length===0){
+    showEmpty(state.filter==="all" ? "No moments yet" : `No ${state.filter}s`,
+              state.filter==="all" ? "Tap the shutter below to capture your first shot."
+                                   : "Try a different filter or capture something new.");
+  } else {
+    appendCards(r.media);
+    updateSub();
+  }
+
+  state.loading=false;
+  $("#sentinel").hidden = !state.hasMore;
+  if(!state.hasMore) $("#loadMoreText").textContent = "";
+}
+
+function appendCards(media){
+  const g=$("#gallery");
+  media.forEach((m,i)=>{
+    const idx = state.loaded.length;         // global index for lightbox
+    state.loaded.push(m);
     const card=document.createElement("div");
-    card.className="card"; card.style.animationDelay=`${Math.min(i*40,400)}ms`;
-    const badge=m.type==="video"?`<span class="badge">● VIDEO</span><div class="play"><span></span></div>`:"";
-    const preview=m.type==="photo"
-      ?`<img loading="lazy" src="${m.src}" alt="${m.name}">`
-      :`<video muted preload="metadata" src="${m.src}#t=0.5"></video>`;
-    card.innerHTML=`${preview}${badge}<div class="meta">${m.name}</div>`;
-    card.onclick=()=>openLightbox(items.indexOf(m),items);
+    card.className="card"; card.style.animationDelay=`${Math.min(i*35,350)}ms`;
+    const badge = m.type==="video"
+      ? `<span class="badge">● VIDEO</span><div class="play"><span></span></div>` : "";
+    const img=document.createElement("img");
+    img.loading="lazy"; img.alt=m.name;
+    card.appendChild(img);
+    card.insertAdjacentHTML("beforeend", `${badge}<div class="meta">${m.name}</div>`);
+    card.onclick=()=>openLightbox(idx);
     g.appendChild(card);
+    hydrateThumb(img, m);                     // cache-first, throttled
   });
 }
+
+function updateSub(){
+  $("#gallerySub").textContent =
+    `${state.loaded.length} of ${state.total} shown · cached for instant reloads`;
+}
+
 function showEmpty(title,msg){
-  $("#gallery").hidden=true;
+  $("#gallery").innerHTML="";
+  $("#sentinel").hidden=true;
   const e=$("#emptyState"); e.hidden=false;
   $("#emptyTitle").textContent=title; $("#emptyMsg").textContent=msg;
 }
 
+/* IntersectionObserver drives infinite scroll */
+const io = new IntersectionObserver((entries)=>{
+  if(entries.some(e=>e.isIntersecting)) loadNextPage();
+}, { rootMargin: "600px 0px" });     // prefetch a bit before the sentinel shows
+io.observe($("#sentinel"));
+
+/* ---------- filters ---------- */
 $$(".seg").forEach(btn=>{
   btn.onclick=()=>{
+    if(btn.classList.contains("active")) return;
     $$(".seg").forEach(b=>b.classList.remove("active")); btn.classList.add("active");
-    state.filter=btn.dataset.filter; renderGallery();
+    state.filter=btn.dataset.filter;
+    resetGallery();
+    loadNextPage();
   };
 });
 
+/* ---------- refresh (force re-scrape) ---------- */
+async function hardRefresh(){
+  toast("Refreshing…");
+  await get(`/api/gallery?page=1&page_size=${PAGE_SIZE}&filter=${state.filter}&refresh=1`);
+  resetGallery();
+  loadNextPage();
+}
+$("#btnRefresh").onclick=hardRefresh;
+$("#emptyRetry").onclick=hardRefresh;
+$("#statusBtn").onclick=refreshStatus;
+
+/* ---------- capture ---------- */
 $("#btnCapture").onclick=async()=>{
   const s=$("#btnCapture"); s.classList.add("flash"); setTimeout(()=>s.classList.remove("flash"),220);
   toast("Capturing…");
   const r=await post("/api/capture");
-  if(r.ok){toast("Photo captured","ok");setTimeout(loadGallery,900);}
+  if(r.ok){toast("Photo captured","ok");setTimeout(hardRefresh,900);}
   else toast(r.error||"Capture failed","err");
 };
 
+/* ---------- record ---------- */
 function setRecording(on){
   state.recording=on;
   const btn=$("#btnRecord"); btn.classList.toggle("active",on); $("#recTime").hidden=!on;
@@ -89,24 +280,24 @@ $("#btnRecord").onclick=async()=>{
   const url=state.recording?"/api/record/stop":"/api/record/start";
   toast(state.recording?"Stopping…":"Recording…");
   const r=await post(url);
-  if(r.ok){setRecording(r.recording);if(!r.recording){toast("Recording saved","ok");setTimeout(loadGallery,1200);}}
+  if(r.ok){setRecording(r.recording);if(!r.recording){toast("Recording saved","ok");setTimeout(hardRefresh,1200);}}
   else toast(r.error||"Record failed","err");
 };
-$("#btnRefresh").onclick=loadGallery;
-$("#emptyRetry").onclick=loadGallery;
-$("#statusBtn").onclick=refreshStatus;
 
-let lbItems=[],lbIndex=0;
-function openLightbox(index,items){lbItems=items;lbIndex=index;renderLightbox();$("#lightbox").hidden=false;document.body.style.overflow="hidden";}
+/* ---------- lightbox (uses full-res proxy) ---------- */
+let lbIndex=0;
+function openLightbox(index){lbIndex=index;renderLightbox();$("#lightbox").hidden=false;document.body.style.overflow="hidden";}
 function renderLightbox(){
-  const m=lbItems[lbIndex]; const stage=$("#lbStage");
-  stage.innerHTML=m.type==="photo"?`<img src="${m.src}" alt="${m.name}">`:`<video src="${m.src}" controls autoplay playsinline></video>`;
-  $("#lbName").textContent=`${m.name}   ·   ${lbIndex+1} / ${lbItems.length}`;
+  const m=state.loaded[lbIndex]; const stage=$("#lbStage");
+  stage.innerHTML=m.type==="photo"
+    ? `<img src="${m.full}" alt="${m.name}">`
+    : `<video src="${m.full}" controls autoplay playsinline></video>`;
+  $("#lbName").textContent=`${m.name}   ·   ${lbIndex+1} / ${state.loaded.length}`;
   $("#lbDownload").href="/api/download?url="+encodeURIComponent(m.url);
   $("#lbDownload").setAttribute("download",m.name);
 }
 function closeLightbox(){$("#lightbox").hidden=true;$("#lbStage").innerHTML="";document.body.style.overflow="";}
-function step(dir){lbIndex=(lbIndex+dir+lbItems.length)%lbItems.length;renderLightbox();}
+function step(dir){lbIndex=(lbIndex+dir+state.loaded.length)%state.loaded.length;renderLightbox();}
 $("#lbClose").onclick=closeLightbox;
 $("#lbPrev").onclick=()=>step(-1);
 $("#lbNext").onclick=()=>step(1);
@@ -118,4 +309,8 @@ document.addEventListener("keydown",(e)=>{
   if(e.key==="ArrowRight")step(1);
 });
 
-refreshStatus(); loadGallery(); setInterval(refreshStatus,8000);
+/* ---------- boot ---------- */
+refreshStatus();
+resetGallery();
+loadNextPage();
+setInterval(refreshStatus,8000);

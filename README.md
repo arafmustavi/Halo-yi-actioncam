@@ -152,6 +152,43 @@ halo/
 ├── requirements.txt
 └── README.md
 ```
+# ⚡ Halo Performance: Pagination & Caching
+
+The original Xiaomi YI has a **tiny embedded HTTP server**. Loading a whole
+gallery at once fires dozens of simultaneous image requests at it, which it
+serializes and chokes on. This build fixes that with four layers.
+
+## 1. Pagination (server + client)
+- `/api/gallery?page=&page_size=` returns only a **slice** of metadata plus
+  `total` and `has_more`. No images are fetched during this call, so it's always
+  cheap on the camera.
+- The UI uses **infinite scroll** (`IntersectionObserver`): the next page loads
+  only as you approach the bottom.
+
+## 2. Concurrency cap (protects the camera)
+- **Client:** a small task queue limits thumbnail fetches to **3 at a time**.
+- **Server:** a `Semaphore(3)` guarantees no more than 3 requests hit the camera
+  at once, even across multiple tabs.
+
+## 3. Server-side thumbnail cache (fetch each photo once)
+- `/thumb` downscales each photo to ~320 px with **Pillow** and stores it on
+  disk (`thumb_cache/`). Every later view is served from disk — the camera is
+  **never touched again** for that file.
+- Full-resolution images are only pulled when you open the **lightbox**.
+
+## 4. Browser thumbnail cache (IndexedDB)
+- Each thumbnail blob is cached in **IndexedDB**, keyed by filename. On reload,
+  Halo checks IndexedDB first and only fetches what's missing — so repeat visits
+  are **instant and camera-free**.
+
+### Housekeeping
+- `POST /api/cache/clear` — wipe the server thumbnail cache.
+- `GET  /api/cache/info`  — cache size & file count.
+- Tunables via env: `HALO_PAGE_SIZE` (24), `HALO_THUMB_PX` (320),
+  `HALO_CACHE_DIR` (cache location).
+
+**Net effect:** the first scroll pulls a few small thumbnails gently, three at a
+time; everything after is instant and never re-hits the camera. 🎯
 
 ---
 

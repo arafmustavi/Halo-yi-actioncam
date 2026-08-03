@@ -1,2 +1,4 @@
 Flask>=3.0
 requests>=2.31
+waitress>=3.0
+Pillow>=10.0
