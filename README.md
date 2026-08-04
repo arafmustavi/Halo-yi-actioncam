@@ -1,5 +1,5 @@
 <p align="center"><img src="docs/halo_icon.png" width="110" alt="Halo"></p>
-<h1 align="center">Halo — Camera Gallery + AI</h1>
+<h1 align="center">Halo </h1>
 
 <p align="center">
   <strong>A web app for the Xiaomi YI Action Camera.
