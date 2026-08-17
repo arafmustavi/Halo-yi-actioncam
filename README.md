@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/halo_icon.png" width="110" alt="Halo"></p>
+<p align="center"><img src="docs/halo_icon.png" width="110" alt="Halo for YI Action Camera"></p>
 <h1 align="center">Halo </h1>
 
 <p align="center">
